@@ -41,4 +41,4 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: |
           # run test suite
-          pipenv run pytest -q
+          python -m pytest -q
