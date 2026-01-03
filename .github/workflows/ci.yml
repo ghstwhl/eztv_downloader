@@ -31,7 +31,7 @@ jobs:
           # Ensure a lockfile exists for --deploy; fall back to creating a virtualenv if not.
           pipenv lock || true
           if [ -f Pipfile.lock ]; then
-            PIPENV_PIPFILE=./Pipfile pipenv install --deploy --system
+            PIPENV_PIPFILE=./Pipfile pipenv install --deploy --system --dev
           else
             pipenv install --dev
           fi
