@@ -63,6 +63,10 @@ def test_get_imdb_meta_handles_errors(monkeypatch):
         def __init__(self, status_code=404, content=b""):
             self.status_code = status_code
             self.content = content
+        
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise eztv.requests.exceptions.HTTPError()
 
     def raise_exc(*a, **kw):
         # raise the same exception type that `eztv.requests` would raise
