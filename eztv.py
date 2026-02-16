@@ -10,6 +10,17 @@ from bs4 import BeautifulSoup
 import transmissionrpc
 import requests
 import sys
+import time
+
+
+API_URLS = [
+    "https://eztvx.to/api/get-torrents",
+    "https://eztv.tf/api/get-torrents"
+]
+
+# Retry/backoff configuration for HTTP requests
+REQUEST_MAX_RETRIES = 3
+REQUEST_BACKOFF_FACTOR = 0.5
 
 pp = pprint.PrettyPrinter(indent=2)
 
@@ -164,37 +175,66 @@ def add_shows(cache_dict, shows):
     return cache_dict
 
 def fetch_eztv_data(page_count):
-    """Retrieve torrent data from eztv API"""
+    """Retrieve torrent data from eztv API with retry/backoff on transient errors.
+    
+    Tries each URL in API_URLS in sequence, retrying with backoff for transient errors.
+    """
 
     print("Fetching EZTV data...")
     torrents = []
-    for page in range(0,page_count):  # EZTV has a lot of pages; adjust as needed
+    for page in range(0, page_count):  # EZTV has a lot of pages; adjust as needed
         print(f"  Fetching page {page}...")
-        api_url = f"https://eztvx.to/api/get-torrents"
+
+        # Try with retries/backoff for transient errors
+        resp = None
+        for url_index, current_url in enumerate(API_URLS):
+            for attempt in range(1, REQUEST_MAX_RETRIES + 1):
+                try:
+                    params = {'limit': 100, 'page': page}
+                    resp = requests.get(current_url, params=params, headers=HTTP_HEADERS, timeout=10)
+                    resp.raise_for_status()
+                    break  # Success, exit attempt loop
+                except requests.exceptions.RequestException as err:
+                    if attempt == REQUEST_MAX_RETRIES:
+                        print(f"Error fetching page {page} from {current_url}: {err} (failed after {REQUEST_MAX_RETRIES} attempts)")
+                    else:
+                        sleep_time = REQUEST_BACKOFF_FACTOR * (2 ** (attempt - 1))
+                        print(f"Transient error fetching page {page}: {err}. Retrying in {sleep_time:.1f}s... (attempt {attempt}/{REQUEST_MAX_RETRIES})")
+                        time.sleep(sleep_time)
+                    resp = None
+            
+            if resp is not None:
+                break  # Success with this URL, exit URL loop
+            elif url_index < len(API_URLS) - 1:
+                print(f"Trying next API URL...")
+
+        # If we didn't get a successful response, skip this page
+        if resp is None:
+            print(f"Failed to fetch page {page} from all API URLs")
+            continue
+
+        if resp.status_code == 404:
+            print("Page not found?")
+            print(resp.url)
+            print(resp.request)
+            return torrents
+        if resp.status_code != 200:
+            print(resp.status_code)
+            print(resp.reason)
+            print(resp.request)
+            print(resp.text)
+            print(resp.url)
+            continue
+
         try:
-            params = {'limit': 100, 'page': page}
-            resp = requests.get(api_url, params=params, headers=HTTP_HEADERS, timeout=10)
-        except requests.exceptions.HTTPError as errh:
-            print(f"HTTP Error when fetching page {page} for IMDB {imdb_id}")
-            print(errh.args[0])
-            exit()
-        else:
-            if 404 == resp.status_code:
-                print("Page not found?")
-                print(resp.url)
-                print(resp.request)
-                return tldr_data
-            if 200 != resp.status_code:
-                print(resp.status_code)
-                print(resp.reason)
-                print(resp.request)
-                print(resp.text)
-                print(resp.url)
-            else:
-                parsed_data = resp.json()
-                if 'torrents' in parsed_data:
-                    torrents += parsed_data['torrents']
-    
+            parsed_data = resp.json()
+        except ValueError as err:
+            print(f"Failed to parse JSON for page {page}: {err}")
+            continue
+
+        if 'torrents' in parsed_data:
+            torrents += parsed_data['torrents']
+
     return torrents
 
 def best_torrent_match(torrent_list):
@@ -228,6 +268,10 @@ def main():
         tc = transmissionrpc.Client(args.transmission_host, port=args.transmission_port)
     except Exception as e:
         print(f"Error: could not connect to Transmission RPC ({args.transmission_host}:{args.transmission_port}): {e}")
+        # Provide actionable guidance to the user so they can resolve connection issues
+        print("Please ensure the Transmission daemon (transmission-daemon) is running and accessible.")
+        print("If Transmission is running on a different host or port, re-run with --transmission-host and --transmission-port to point to the correct RPC endpoint.")
+        print("Example: eztv --transmission-host 192.168.1.100 --transmission-port 9091")
         sys.exit(1)
 
     cache_dict = read_cache()
@@ -259,9 +303,9 @@ def main():
     messages = []
     eztv_data=fetch_eztv_data(args.page_count)
     for imdb_id in cache_dict['shows']:
-        if args.only is not None \
-                and imdb_id not in args.only \
-                and 'active' != cache_dict['shows'][imdb_id]['status']:
+        if 'active' != cache_dict['shows'][imdb_id]['status']:
+            continue
+        if args.only is not None and imdb_id not in args.only:
             continue
         print(f"Checking: {imdb_id} - {cache_dict['shows'][imdb_id]['title']}")
         for season in set([x['season'] for x in eztv_data if x['imdb_id'] == imdb_id]):

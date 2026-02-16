@@ -75,3 +75,124 @@ def test_get_imdb_meta_handles_errors(monkeypatch):
     # Patch requests.get to return 404
     monkeypatch.setattr(eztv.requests, 'get', lambda *a, **kw: DummyResp(404))
     assert eztv.get_imdb_meta('0000000') is False
+
+
+def test_fetch_eztv_data_handles_timeout(monkeypatch):
+    class DummyResp:
+        def __init__(self, status_code=200, data=None):
+            self.status_code = status_code
+            self._data = data or {}
+            self.url = "https://eztvx.to/api/get-torrents"
+            self.request = None
+            self.reason = "OK"
+            self.text = json.dumps(self._data)
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise eztv.requests.exceptions.HTTPError()
+
+        def json(self):
+            return self._data
+
+    # Simulate a successful first page and then a timeout on later pages
+    def side_effect(url, params=None, headers=None, timeout=None):
+        page = (params or {}).get('page')
+        if page == 0:
+            return DummyResp(200, {'torrents': [{'imdb_id': '1', 'season': 1, 'episode': 1, 'filename': 'a.mkv', 'magnet_url': 'm1', 'seeds': 1}]})
+        else:
+            raise eztv.requests.exceptions.ReadTimeout()
+
+    monkeypatch.setattr(eztv.requests, 'get', side_effect)
+
+    # Should not raise and should return the torrents collected from successful pages
+    torrents = eztv.fetch_eztv_data(3)
+    assert any(t.get('magnet_url') == 'm1' for t in torrents)
+
+
+def test_fetch_eztv_data_retries_and_succeeds(monkeypatch):
+    class DummyResp:
+        def __init__(self, status_code=200, data=None):
+            self.status_code = status_code
+            self._data = data or {}
+            self.url = "https://eztvx.to/api/get-torrents"
+            self.request = None
+            self.reason = "OK"
+            self.text = json.dumps(self._data)
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise eztv.requests.exceptions.HTTPError()
+
+        def json(self):
+            return self._data
+
+    counters = {'page1': 0}
+
+    def side_effect(url, params=None, headers=None, timeout=None):
+        page = (params or {}).get('page')
+        if page == 0:
+            return DummyResp(200, {'torrents': [{'imdb_id': '1', 'season': 1, 'episode': 1, 'filename': 'a.mkv', 'magnet_url': 'm1', 'seeds': 1}]})
+        elif page == 1:
+            counters['page1'] += 1
+            # Fail the first two attempts, succeed on the 3rd
+            if counters['page1'] < 3:
+                raise eztv.requests.exceptions.ReadTimeout()
+            return DummyResp(200, {'torrents': [{'imdb_id': '2', 'season': 1, 'episode': 2, 'filename': 'b.mkv', 'magnet_url': 'm2', 'seeds': 1}]})
+        else:
+            return DummyResp(200, {})
+
+    monkeypatch.setattr(eztv.requests, 'get', side_effect)
+
+    torrents = eztv.fetch_eztv_data(2)
+    assert any(t.get('magnet_url') == 'm1' for t in torrents)
+    assert any(t.get('magnet_url') == 'm2' for t in torrents)
+
+
+def test_main_skips_inactive_shows(monkeypatch, tmp_path):
+    """Test that shows with 'inactive' status are skipped during download processing."""
+    import unittest.mock as mock
+
+    # Set up test cache with one active and one inactive show
+    cache_dict = {
+        'version': 2,
+        'shows': {
+            '111': {
+                'title': 'Active Show',
+                'url': 'http://imdb.com/title/tt111',
+                'status': 'active',
+                'seasons': {}
+            },
+            '222': {
+                'title': 'Inactive Show',
+                'url': 'http://imdb.com/title/tt222',
+                'status': 'inactive',
+                'seasons': {}
+            }
+        }
+    }
+
+    # Mock Transmission client
+    mock_tc = mock.MagicMock()
+
+    # Mock fetch_eztv_data to return torrents for both shows
+    eztv_data = [
+        {'imdb_id': '111', 'season': 1, 'episode': 1, 'filename': 'active.s01e01.mkv', 'magnet_url': 'm_active', 'seeds': 5},
+        {'imdb_id': '222', 'season': 1, 'episode': 1, 'filename': 'inactive.s01e01.mkv', 'magnet_url': 'm_inactive', 'seeds': 5},
+    ]
+
+    # Mock functions
+    monkeypatch.setattr(eztv, 'read_cache', lambda: cache_dict)
+    monkeypatch.setattr(eztv, 'write_cache', lambda x: True)
+    monkeypatch.setattr(eztv, 'fetch_eztv_data', lambda x: eztv_data)
+    monkeypatch.setattr(eztv.transmissionrpc, 'Client', lambda *args, **kwargs: mock_tc)
+
+    # Mock sys.argv to simulate no arguments
+    monkeypatch.setattr(sys, 'argv', ['eztv.py'])
+
+    # Call main
+    eztv.main()
+
+    # Verify that only the active show's torrent was added
+    assert mock_tc.add_torrent.call_count == 1
+    call_args = mock_tc.add_torrent.call_args
+    assert call_args[0][0] == 'm_active'
