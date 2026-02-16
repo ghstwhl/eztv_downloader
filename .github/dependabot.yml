@@ -4,8 +4,11 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 5
-    allow:
-      - dependency-type: "direct"
+      day: "monday"
+      time: "03:00"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "github@ghostwheel.kiwi"
     labels:
       - "dependencies"
+      - "python"
