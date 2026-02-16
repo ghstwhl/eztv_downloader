@@ -2,6 +2,8 @@
 
 Small utility that fetches TV show torrents from EZTV and queues them in Transmission.
 
+**Disclaimer:** This code has been developed and tested with the aid of AI tooling (GitHub Copilot).
+
 Features
 - Fetches torrent metadata from the EZTV API
 - Picks a preferred torrent (HEVC/H264, 1080p/720p, seeded)
@@ -68,6 +70,9 @@ Notes
 
 Contributing
 - Feel free to open issues or PRs. Keep changes focused and add tests if appropriate.
+
+Copyright
+- Copyright © Chris Knight - https://github.com/ghstwhl
 
 License
 - See the `LICENSE` file in the repository.
