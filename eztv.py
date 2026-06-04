@@ -88,29 +88,28 @@ def write_cache(data):
 
 
 def get_imdb_meta(imdb_id, headers=HTTP_HEADERS):
-    """Get IMDB meta data"""
-    imdb_url = f"https://www.imdb.com/title/tt{imdb_id}/"
+    """Get IMDB meta data using the IMDB suggestion JSON API."""
+    full_id = f"tt{imdb_id}"
+    api_url = f"https://v2.sg.media-imdb.com/suggestion/t/{full_id}.json"
     try:
-        resp = requests.get(imdb_url, headers=headers, timeout=10)
+        resp = requests.get(api_url, headers=headers, timeout=10)
         resp.raise_for_status()
     except requests.exceptions.RequestException as e:
         logger.warning(f"Failed to fetch IMDB data for {imdb_id}: {e}")
         return False
-    
-    if resp.status_code == 404:
+
+    try:
+        data = resp.json()
+        if data.get('d'):
+            item = data['d'][0]
+            return {
+                'title': item['l'],
+                'url': f"https://www.imdb.com/title/{item['id']}/"
+            }
         logger.warning(f"IMDB ID {imdb_id} not found")
         return False
-    
-    try:
-        content = BeautifulSoup(resp.content, 'lxml')
-        title = content.find("meta", property="og:title")
-        url = content.find("meta", property="og:url")
-        return {
-            'title': title["content"] if title else "No meta title given",
-            'url': url["content"] if url else "No meta url given"
-        }
     except Exception as e:
-        logger.error(f"Error parsing IMDB page for {imdb_id}: {e}")
+        logger.error(f"Error parsing IMDB API response for {imdb_id}: {e}")
         return False
 
 def convert_cache(cache_dict):

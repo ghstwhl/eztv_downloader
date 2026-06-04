@@ -60,25 +60,49 @@ def test_cli_defaults(monkeypatch):
 
 def test_get_imdb_meta_handles_errors(monkeypatch):
     class DummyResp:
-        def __init__(self, status_code=404, content=b""):
+        def __init__(self, status_code=200, data=None):
             self.status_code = status_code
-            self.content = content
-        
+            self._data = data or {}
+
         def raise_for_status(self):
             if self.status_code >= 400:
                 raise eztv.requests.exceptions.HTTPError()
 
+        def json(self):
+            return self._data
+
     def raise_exc(*a, **kw):
-        # raise the same exception type that `eztv.requests` would raise
         raise eztv.requests.exceptions.RequestException()
 
-    # Patch requests.get to raise an exception
+    # Patch requests.get to raise a network exception
     monkeypatch.setattr(eztv.requests, 'get', raise_exc)
     assert eztv.get_imdb_meta('0000000') is False
 
-    # Patch requests.get to return 404
+    # Patch requests.get to return a 404 HTTP error
     monkeypatch.setattr(eztv.requests, 'get', lambda *a, **kw: DummyResp(404))
     assert eztv.get_imdb_meta('0000000') is False
+
+    # Patch requests.get to return a 200 with no results in 'd'
+    monkeypatch.setattr(eztv.requests, 'get', lambda *a, **kw: DummyResp(200, {}))
+    assert eztv.get_imdb_meta('0000000') is False
+
+
+def test_get_imdb_meta_success(monkeypatch):
+    class DummyResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                'd': [{'l': 'The Boroughs', 'id': 'tt27557289', 'q': 'TV series'}]
+            }
+
+    monkeypatch.setattr(eztv.requests, 'get', lambda *a, **kw: DummyResp())
+    result = eztv.get_imdb_meta('27557289')
+    assert result == {
+        'title': 'The Boroughs',
+        'url': 'https://www.imdb.com/title/tt27557289/'
+    }
 
 
 def test_fetch_eztv_data_handles_timeout(monkeypatch):
