@@ -17,11 +17,11 @@ import eztv
 def test_read_and_write_cache(tmp_path, monkeypatch):
     # Point HOMEDIR to a temp dir
     monkeypatch.setattr(eztv, 'HOMEDIR', str(tmp_path))
-    # Ensure no cache exists
+    # Ensure no cache exists — fresh caches are initialized with v2 format
     cache = eztv.read_cache()
-    assert cache == {}
+    assert cache == {'version': 2, 'shows': {}}
 
-    data = {"shows": {"123": {"title": "Test Show"}}}
+    data = {"version": 2, "shows": {"123": {"title": "Test Show"}}}
     assert eztv.write_cache(data) is True
 
     # Read back and compare
@@ -212,7 +212,7 @@ def test_main_skips_inactive_shows(monkeypatch, tmp_path):
     monkeypatch.setattr(eztv, 'read_cache', lambda: cache_dict)
     monkeypatch.setattr(eztv, 'write_cache', lambda x: True)
     monkeypatch.setattr(eztv, 'fetch_eztv_data', lambda x: eztv_data)
-    monkeypatch.setattr(eztv.transmissionrpc, 'Client', lambda *args, **kwargs: mock_tc)
+    monkeypatch.setattr(eztv.transmissionrpc, 'Client', lambda *a, **kw: mock_tc)
 
     # Mock sys.argv to simulate no arguments
     monkeypatch.setattr(sys, 'argv', ['eztv.py'])

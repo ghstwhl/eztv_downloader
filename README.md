@@ -1,78 +1,144 @@
 # EZTV Downloader
 
-Small utility that fetches TV show torrents from EZTV and queues them in Transmission.
+Fetches TV show torrents from the EZTV API and queues them in Transmission.
 
-**Disclaimer:** This code has been developed and tested with the aid of AI tooling (GitHub Copilot).
+**Disclaimer:** This code was developed and tested with the aid of AI tooling.
 
-Features
-- Fetches torrent metadata from the EZTV API
-- Picks a preferred torrent (HEVC/H264, 1080p/720p, seeded)
+## Features
+
+- Fetches torrent metadata from the EZTV API with concurrent page requests
+- Picks the best torrent per episode (HEVC > H265 > X265 > H264 > X264; 1080p > 720p > HDTV > 480p)
+- Falls back to the most-seeded torrent when codec and resolution preferences don't match
 - Adds torrents to Transmission via RPC
-- Tracks downloads in a simple JSON cache (~/.eztv/downloader.json)
+- Tracks downloaded episodes in a JSON cache (`~/.eztv/downloader.json`)
+- Retries transient API errors with exponential backoff
+- Auto-converts legacy v1 cache format to v2
 
-Requirements
-- Python 3.13
-- Transmission (with RPC enabled)
-- pipenv (recommended for development)
+## Requirements
 
-Installation (local development)
+- **Python** ≥ 3.13
+- **Transmission** daemon with RPC enabled
+- **pipenv** (recommended) or plain `pip` + venv
 
-1. Install pipenv (if not already):
+## Installation
 
-```bash
-pip3 install --user pipenv
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-2. Install dependencies and create a virtualenv:
+### Using pipenv (recommended)
 
 ```bash
 cd eztv_downloader
 pipenv install
-pipenv shell      # optional: spawn a shell inside the environment
 ```
 
-Running without a virtualenv (e.g. in a container / devcontainer)
+### Using plain pip
 
 ```bash
-cd eztv_downloader
-pipenv lock
-PIPENV_PIPFILE=./Pipfile pipenv install --deploy --system
+python3 -m venv .venv
+source .venv/bin/activate
+pip install transmission-rpc requests
 ```
 
-Usage
+## Usage
+
+### Quick start
 
 ```bash
-# Show help
+# Show all options
 python eztv.py --help
 
-# Add a show to track (IMDB id)
-python eztv.py --add 1234567
+# Add shows to track (use the numeric IMDB id — the 'tt' prefix is optional)
+python eztv.py --add 12327578
 
-# List tracked shows
+# Add multiple at once
+python eztv.py --add 12327578 --add 0452046 --add 14688458
+
+# List all tracked shows and their status
 python eztv.py --list
 
-# Run downloader (default connects to localhost:9091)
+# Run the downloader (defaults to Transmission at localhost:9091)
 python eztv.py
 ```
 
-Options of interest
-- `--transmission-host` and `--transmission-port`: Transmission RPC connection
-- `--page-count`: number of EZTV API pages to fetch (default 20)
-- `--nosave`: perform downloads without saving to cache
+### Full option reference
 
-Cache and data
-- Cache file: `~/.eztv/downloader.json` (auto-created)
+| Flag | Description |
+|---|---|
+| `--add IMDB_ID` | Add a show to track. Repeatable. Accepts plain numeric ID or `tt`/`vv`-prefixed. |
+| `--list` | List all tracked shows with status, URL, and title. |
+| `--list-downloaded` | Dump the full cache as JSON. |
+| `--deactivate IMDB_ID` | Mark a show inactive (keep its download history). Repeatable. |
+| `--purge IMDB_ID` | Remove a show and its download history entirely. Repeatable. |
+| `--only IMDB_ID` | For this run, only process the given shows. Repeatable. |
+| `--transmission-host HOST` | Transmission RPC host. Default: `localhost`. |
+| `--transmission-port PORT` | Transmission RPC port. Default: `9091`. |
+| `--page-count N` | Number of EZTV API pages to fetch (100 torrents per page). Default: `20`. |
 
-Notes
-- Transmission must be running and have RPC enabled for the script to add torrents. The script will exit with a clear message if it cannot connect to Transmission.
-- The `Pipfile` lists the runtime dependencies (`transmissionrpc`, `beautifulsoup4`). Use `pipenv` to manage them.
+### Setting up a shortcut
 
-Contributing
-- Feel free to open issues or PRs. Keep changes focused and add tests if appropriate.
+Add this alias to your `~/.zshrc` or `~/.bashrc`:
 
-Copyright
-- Copyright © Chris Knight - https://github.com/ghstwhl
+```bash
+alias eztv='source /path/to/venv/bin/activate; /path/to/eztv_downloader/eztv.py'
+```
 
-License
-- See the `LICENSE` file in the repository.
+Then just run `eztv` from anywhere.
+
+## How it works
+
+1. **Parse CLI args** — determines which action to take (add shows, list, download, etc).
+2. **Connect to Transmission** — establishes an RPC connection with the configured host and port.
+3. **Read cache** — loads `~/.eztv/downloader.json`, auto-converting v1 caches to v2 format if needed.
+4. **Perform early-exit actions** — `--purge`, `--deactivate`, `--add`, `--list`, and `--list-downloaded` return immediately after their work is done.
+5. **Fetch EZTV data** — fetches torrent metadata across multiple API pages concurrently (5 workers), with URL fallback and retry/backoff on transient errors.
+6. **Match torrents** — for each active show, finds available seasons and episodes in the EZTV data. Picks the best torrent by codec and resolution preference, falling back to the most-seeded option.
+7. **Queue in Transmission** — adds the chosen magnet link to Transmission via RPC.
+8. **Update cache** — records newly downloaded episodes and writes the cache back to disk.
+
+## Cache format
+
+The cache lives at `~/.eztv/downloader.json`. The v2 format:
+
+```json
+{
+  "version": 2,
+  "shows": {
+    "12327578": {
+      "title": "Star Trek: Strange New Worlds",
+      "url": "https://www.imdb.com/title/tt12327578/",
+      "status": "active",
+      "seasons": {
+        "1": {"1": "magnet:?...", "2": "magnet:?..."},
+        "2": {"1": "magnet:?..."}
+      }
+    }
+  }
+}
+```
+
+- `status`: `active` shows are processed during download runs; `inactive` shows are skipped but retain their download history.
+- `seasons`: tracks which episodes have been downloaded so future runs skip them.
+
+## Notes
+
+- **Transmission must be running** with RPC enabled. If the script can't connect, it exits with a clear error message including the host and port it tried.
+- The EZTV API is accessed at `eztvx.to` and `eztv.tf` as fallback. No API key is required.
+- IMDB metadata (show titles and URLs) is fetched from the IMDB suggestion API when adding new shows.
+- Page fetching is concurrent (5 threads) to minimize total wait time. Each individual page still benefits from URL fallback and retry/backoff.
+
+## Running tests
+
+```bash
+pipenv install --dev    # or: pip install pytest transmission-rpc requests
+python -m pytest -v
+```
+
+## Contributing
+
+Feel free to open issues or PRs. Keep changes focused and add tests if appropriate.
+
+## Copyright
+
+Copyright © Chris Knight — https://github.com/ghstwhl
+
+## License
+
+See the `LICENSE` file in the repository.
