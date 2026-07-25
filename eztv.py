@@ -8,11 +8,11 @@ import argparse
 from operator import itemgetter
 from collections import defaultdict
 import re
-from bs4 import BeautifulSoup
-import transmissionrpc
+import transmission_rpc as transmissionrpc
 import requests
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
@@ -60,15 +60,20 @@ def cli():
     return parser.parse_args()
 
 def read_cache():
-    """Read or initialize the cache"""
+    """Read or initialize the cache, auto-converting v1 format to v2."""
     eztv_cache = os.path.join(HOMEDIR, '.eztv', 'downloader.json')
     if os.path.isfile(eztv_cache):
         logger.info("Reading cache...")
         with open(eztv_cache, 'r') as f:
             cache_dict = json.load(f)
+        # Auto-convert legacy v1 cache format to v2 if needed
+        converted = convert_cache(cache_dict)
+        if converted is not None:
+            cache_dict = converted
+            write_cache(cache_dict)
     else:
         logger.info("Initializing cache...")
-        cache_dict = {}
+        cache_dict = {'version': 2, 'shows': {}}
     return cache_dict
 
 def write_cache(data):
@@ -80,7 +85,7 @@ def write_cache(data):
 
     try:
         with open(os.path.join(eztv_dir, 'downloader.json'), 'w') as outfile:
-            json.dump(data, outfile, indent=4)
+            json.dump(data, outfile, separators=(',', ':'))
         return True
     except Exception as e:
         logger.error(f"Failed to write cache: {e}")
@@ -113,25 +118,31 @@ def get_imdb_meta(imdb_id, headers=HTTP_HEADERS):
         return False
 
 def convert_cache(cache_dict):
-    """Update cache format, if necessary"""
-    if 'version' not in cache_dict or cache_dict['version'] < 2:
-        logger.info("Converting cache to v2 format...")
-        new_cache = {
-            'version': 2,
-            'shows': {}
-        }
-        for show in cache_dict:
-            new_cache['shows'][show] = {}
-            show_meta_data = get_imdb_meta(show)
-            if show_meta_data:
-                new_cache['shows'][show]['url'] = show_meta_data['url']
-                new_cache['shows'][show]['title'] = show_meta_data['title']
-            new_cache['shows'][show]['status'] = 'active'
-            new_cache['shows'][show]['seasons'] = cache_dict[show]
-        return new_cache
-    else:
-        logger.info("Data format already current")
+    """Update cache format, if necessary. Returns new dict if converted, None if already current."""
+    if 'version' in cache_dict and cache_dict['version'] >= 2:
         return None
+    # Detect v2 format by the presence of a 'shows' key (even if version marker is missing)
+    if 'shows' in cache_dict:
+        if 'version' not in cache_dict:
+            cache_dict['version'] = 2
+        return None
+    if not cache_dict:
+        # Empty v1 cache — just initialize v2
+        return {'version': 2, 'shows': {}}
+    logger.info("Converting cache to v2 format...")
+    new_cache = {
+        'version': 2,
+        'shows': {}
+    }
+    for show in cache_dict:
+        new_cache['shows'][show] = {}
+        show_meta_data = get_imdb_meta(show)
+        if show_meta_data:
+            new_cache['shows'][show]['url'] = show_meta_data['url']
+            new_cache['shows'][show]['title'] = show_meta_data['title']
+        new_cache['shows'][show]['status'] = 'active'
+        new_cache['shows'][show]['seasons'] = cache_dict[show]
+    return new_cache
 
 def purge_shows(cache_dict, shows):
     """Purge shows"""
@@ -183,57 +194,83 @@ def add_shows(cache_dict, shows):
                 }
     return cache_dict
 
+def _fetch_single_page(page):
+    """Fetch a single page of torrent data, trying each API URL with retry/backoff.
+
+    Returns:
+        list of torrent dicts on success, empty list on failure, or None to signal
+        a 404 (no more pages available).
+    """
+    for url_index, current_url in enumerate(API_URLS):
+        for attempt in range(1, REQUEST_MAX_RETRIES + 1):
+            try:
+                params = {'limit': 100, 'page': page}
+                resp = requests.get(current_url, params=params, headers=HTTP_HEADERS, timeout=10)
+                resp.raise_for_status()
+
+                if resp.status_code == 404:
+                    return None
+                if resp.status_code != 200:
+                    logger.error(f"HTTP {resp.status_code}: {resp.reason} - {resp.url}")
+                    break
+
+                try:
+                    parsed_data = resp.json()
+                except ValueError as err:
+                    logger.error(f"Failed to parse JSON for page {page}: {err}")
+                    break
+
+                if 'torrents' in parsed_data:
+                    return parsed_data['torrents']
+                return []
+
+            except requests.exceptions.RequestException as err:
+                if attempt == REQUEST_MAX_RETRIES:
+                    logger.error(
+                        f"Error fetching page {page} from {current_url}: {err} "
+                        f"(failed after {REQUEST_MAX_RETRIES} attempts)"
+                    )
+                else:
+                    sleep_time = REQUEST_BACKOFF_FACTOR * (2 ** (attempt - 1))
+                    logger.warning(
+                        f"Transient error fetching page {page}: {err}. "
+                        f"Retrying in {sleep_time:.1f}s... (attempt {attempt}/{REQUEST_MAX_RETRIES})"
+                    )
+                    time.sleep(sleep_time)
+
+        if url_index < len(API_URLS) - 1:
+            logger.info(f"Trying next API URL for page {page}...")
+
+    logger.warning(f"Failed to fetch page {page} from all API URLs")
+    return []
+
+
 def fetch_eztv_data(page_count):
-    """Retrieve torrent data from eztv API with retry/backoff on transient errors.
-    
-    Tries each URL in API_URLS in sequence, retrying with backoff for transient errors.
+    """Retrieve torrent data from the EZTV API using concurrent page fetches.
+
+    Pages are fetched in parallel via ThreadPoolExecutor while each individual
+    page still benefits from URL fallback and retry/backoff on transient errors.
     """
     logger.info("Fetching EZTV data...")
     torrents = []
-    for page in range(0, page_count):
-        logger.info(f"  Fetching page {page}...")
 
-        resp = None
-        for url_index, current_url in enumerate(API_URLS):
-            for attempt in range(1, REQUEST_MAX_RETRIES + 1):
-                try:
-                    params = {'limit': 100, 'page': page}
-                    resp = requests.get(current_url, params=params, headers=HTTP_HEADERS, timeout=10)
-                    resp.raise_for_status()
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        future_to_page = {
+            executor.submit(_fetch_single_page, page): page
+            for page in range(page_count)
+        }
+        for future in as_completed(future_to_page):
+            page = future_to_page[future]
+            try:
+                result = future.result()
+                if result is None:
+                    # 404 — no more pages; cancel outstanding fetches
+                    for f in future_to_page:
+                        f.cancel()
                     break
-                except requests.exceptions.RequestException as err:
-                    if attempt == REQUEST_MAX_RETRIES:
-                        logger.error(f"Error fetching page {page} from {current_url}: {err} (failed after {REQUEST_MAX_RETRIES} attempts)")
-                    else:
-                        sleep_time = REQUEST_BACKOFF_FACTOR * (2 ** (attempt - 1))
-                        logger.warning(f"Transient error fetching page {page}: {err}. Retrying in {sleep_time:.1f}s... (attempt {attempt}/{REQUEST_MAX_RETRIES})")
-                        time.sleep(sleep_time)
-                    resp = None
-            
-            if resp is not None:
-                break
-            elif url_index < len(API_URLS) - 1:
-                logger.info("Trying next API URL...")
-
-        if resp is None:
-            logger.warning(f"Failed to fetch page {page} from all API URLs")
-            continue
-
-        if resp.status_code == 404:
-            logger.error(f"Page not found: {resp.url}")
-            return torrents
-        if resp.status_code != 200:
-            logger.error(f"HTTP {resp.status_code}: {resp.reason} - {resp.url}")
-            continue
-
-        try:
-            parsed_data = resp.json()
-        except ValueError as err:
-            logger.error(f"Failed to parse JSON for page {page}: {err}")
-            continue
-
-        if 'torrents' in parsed_data:
-            torrents += parsed_data['torrents']
+                torrents.extend(result)
+            except Exception as err:
+                logger.error(f"Unexpected error processing page {page}: {err}")
 
     return torrents
 
@@ -270,7 +307,7 @@ def main():
     args = cli()
 
     try:
-        tc = transmissionrpc.Client(args.transmission_host, port=args.transmission_port)
+        tc = transmissionrpc.Client(host=args.transmission_host, port=args.transmission_port)
     except Exception as e:
         logger.error(f"Error: could not connect to Transmission RPC ({args.transmission_host}:{args.transmission_port}): {e}")
         logger.error("Please ensure the Transmission daemon (transmission-daemon) is running and accessible.")
@@ -297,7 +334,6 @@ def main():
         cache_update = True
         
     if args.list_downloaded:
-        import json
         logger.info(json.dumps(cache_dict, indent=2))
         return
 
@@ -308,32 +344,37 @@ def main():
     messages = []
     eztv_data = fetch_eztv_data(args.page_count)
     
-    # Build a lookup for torrents by show/season/episode for efficiency
+    # Build two indexes in a single O(N) pass over torrent data:
+    #  - torrents_by_key: (imdb_id, season, episode) -> [torrents]
+    #  - show_seasons: imdb_id -> {season -> set(episodes)}  (replaces the O(N²) scans)
     torrents_by_key = defaultdict(list)
+    show_seasons = defaultdict(lambda: defaultdict(set))
     for torrent in eztv_data:
-        key = (torrent['imdb_id'], torrent['season'], torrent['episode'])
-        torrents_by_key[key].append(torrent)
-    
-    for imdb_id in cache_dict['shows']:
-        if cache_dict['shows'][imdb_id]['status'] != 'active':
+        imdb_id, season, episode = torrent['imdb_id'], torrent['season'], torrent['episode']
+        torrents_by_key[(imdb_id, season, episode)].append(torrent)
+        show_seasons[imdb_id][season].add(episode)
+
+    # Single loop over all shows — same structure as the original code,
+    # but with O(1) season/episode lookups instead of scanning eztv_data each time.
+    for imdb_id, show in cache_dict['shows'].items():
+        if show['status'] != 'active':
             continue
         if args.only is not None and imdb_id not in args.only:
             continue
-        logger.info(f"Checking: {imdb_id} - {cache_dict['shows'][imdb_id]['title']}")
-        
-        for season in set([x['season'] for x in eztv_data if x['imdb_id'] == imdb_id]):
-            if season not in cache_dict['shows'][imdb_id]['seasons']:
-                cache_dict['shows'][imdb_id]['seasons'][season] = {}
-            
-            for episode in set([x['episode'] for x in eztv_data if x['imdb_id'] == imdb_id and x['season'] == season]):
-                if episode not in cache_dict['shows'][imdb_id]['seasons'][season]:
-                    key = (imdb_id, season, episode)
-                    best_link = best_torrent_match(torrents_by_key[key])
+        logger.info(f"Checking: {imdb_id} - {show['title']}")
+
+        for season in show_seasons.get(imdb_id, {}):
+            if season not in show['seasons']:
+                show['seasons'][season] = {}
+
+            for episode in show_seasons[imdb_id][season]:
+                if episode not in show['seasons'][season]:
+                    best_link = best_torrent_match(torrents_by_key[(imdb_id, season, episode)])
                     if best_link:
                         tc.add_torrent(best_link['magnet_link'])
-                        cache_dict['shows'][imdb_id]['seasons'][season][episode] = best_link['magnet_link']
+                        show['seasons'][season][episode] = best_link['magnet_link']
                         cache_update = True
-                        messages.append(f"ADDED {cache_dict['shows'][imdb_id]['title']} - Season {season} - {episode} - {best_link['filename']}")
+                        messages.append(f"ADDED {show['title']} - Season {season} - {episode} - {best_link['filename']}")
 
     for msg in messages:
         logger.info(msg)

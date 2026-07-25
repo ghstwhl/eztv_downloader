@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python *)",
+      "Bash(pipenv run *)",
+      "Bash(pip3 install *)",
+      "Bash(PIPENV_PYTHON=/usr/local/bin/python3.13 pipenv install --dev)",
+      "Bash(python3 -m venv /tmp/test_venv)",
+      "Bash(/tmp/test_venv/bin/pip install *)",
+      "Bash(/tmp/test_venv/bin/python *)",
+      "Bash(python3 -m venv /tmp/test_venv2)",
+      "Bash(/tmp/test_venv2/bin/pip install *)",
+      "Bash(/tmp/test_venv2/bin/python -m pytest -v)",
+      "Bash(python3 -m venv /tmp/test_venv3)",
+      "Bash(/tmp/test_venv3/bin/pip install *)",
+      "Bash(/tmp/test_venv3/bin/python -m pytest -v)",
+      "Bash(pip3 show *)",
+      "Bash(/tmp/test_venv4/bin/python *)",
+      "Read(//Users/merlin/Repos/Scripts/eztv-x86/**)",
+      "Bash(~/Repos/Scripts/eztv-x86/bin/pip show *)",
+      "Bash(md5 -q /Users/merlin/Repos/eztv_downloader/eztv.py)",
+      "WebSearch",
+      "Bash(python3 -m venv /tmp/test_venv5)",
+      "Bash(/tmp/test_venv5/bin/pip install *)",
+      "Bash(/tmp/test_venv5/bin/python *)",
+      "Bash(python3 -m venv /tmp/test_venv6)",
+      "Bash(/tmp/test_venv6/bin/pip install *)",
+      "Bash(/tmp/test_venv6/bin/python -m pytest -v)",
+      "Bash(python3 -m venv /tmp/test_venv7)",
+      "Bash(/tmp/test_venv7/bin/pip install *)",
+      "Bash(/tmp/test_venv7/bin/python -m pytest -v)",
+      "Bash(/tmp/test_venv7/bin/python *)"
+    ]
+  }
+}
